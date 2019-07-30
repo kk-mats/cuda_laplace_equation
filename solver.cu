@@ -5,6 +5,7 @@
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/extrema.h>
 
 using host_buffer=thrust::host_vector<float>;
 using device_buffer=thrust::device_vector<float>;
@@ -58,8 +59,13 @@ auto remove_padding(const thrust::host_vector<T> &padded_buffer, const int origi
 
 auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int global_size, const int local_size)
 {
+	const int padded_size=global_size+2;
+
 	device_buffer d_buffer=append_padding<float>(h_buffer, 0, global_size);
 	device_mask d_mask=append_padding<int>(h_mask, 0, global_size);
+
+	host_buffer h_delta(padded_size*padded_size, 0.f);
+	device_buffer d_delta=h_delta;;
 
 
 	float max_delta=0;
@@ -68,7 +74,10 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 
 	do
 	{
+		d_delta=h_delta;
+		max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
 
+		std::cout<<"max_delta="<<max_delta<<std::endl;
 	}
 	while(min_delta<max_delta);
 
@@ -111,7 +120,14 @@ public:
 	auto solve()
 	{
 		//return kernel::solver(this->buffer_, this->host_even_mask, this->host_odd_mask, this->host_global_mask);
-		return new_solver(this->h_buffer_, this->h_mask_, this->h_, 16);
+		try
+		{
+			return new_solver(this->h_buffer_, this->h_mask_, this->h_, 16);
+		}
+		catch(thrust::system_error &e)
+		{
+			std::cerr<<"Exception:\n"<<e.what()<<std::endl;
+		}
 	}
 
 	auto result() const
