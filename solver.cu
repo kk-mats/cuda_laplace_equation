@@ -16,7 +16,7 @@ using device_buffer=thrust::device_vector<float>;
 using host_mask=thrust::host_vector<int>;
 using device_mask=thrust::device_vector<int>;
 constexpr int args_padded_size=0;
-constexpr int args_local_size=1;
+constexpr int local_size=32;
 
 namespace kernel
 {
@@ -37,10 +37,7 @@ __device__
 void block_solver(float *buffer, float *delta, int *mask, int *args, const int offset)
 {
 	const int padded_size=args[args_padded_size];
-
-	const uint2 left_top_global=make_uint2(args[args_local_size]*blockIdx.x, args[args_local_size]*blockIdx.y);
-	const uint2 global_base=make_uint2(left_top_global.x+1+2*threadIdx.x, left_top_global.y+1+threadIdx.y);
-	const int global_1d=to_1d(make_uint2(global_base.x+offset, global_base.y), padded_size);
+	const int global_1d=to_1d(make_uint2(local_size*blockIdx.x+1+2*threadIdx.x+offset, local_size*blockIdx.y+1+threadIdx.y), padded_size);
 	
 	const float prev=buffer[global_1d];
 	buffer[global_1d]=(1-mask[global_1d])*prev+mask[global_1d]*(
@@ -99,12 +96,11 @@ auto remove_padding(const thrust::host_vector<T> &padded_buffer, const int origi
 }
 
 __host__
-auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int global_size, const int local_size)
+auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int global_size)
 {
 	const int padded_size=global_size+2;
 	host_mask h_args;
 	h_args.push_back(padded_size);
-	h_args.push_back(local_size);
 	device_mask d_args=h_args;
 
 	device_buffer d_buffer=append_padding<float>(h_buffer, 0, global_size);
@@ -152,7 +148,7 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 	}
 
 	host_buffer new_h_buffer=d_buffer;
-	return remove_padding<float>(new_h_buffer, global_size);
+	return new_h_buffer;
 }
 
 
@@ -189,7 +185,7 @@ public:
 
 	auto solve()
 	{
-		return new_solver(this->h_buffer_, this->h_mask_, this->h_, 32);
+		return new_solver(this->h_buffer_, this->h_mask_, this->h_);
 	}
 
 
@@ -221,20 +217,20 @@ private:
 
 int main()
 {
-	constexpr int h=2048;
+	constexpr int h=512;
 	auto solver=cpu_potential_solver(h);
 
 	const auto result=solver.solve();
 
 	std::ofstream os("./out.csv");
 
-	for(int y=h-1; 0<=y; --y)
+	for(int y=h; 1<=y; --y)
 	{
-		for(int x=0; x<h; ++x)
+		for(int x=1; x<=h; ++x)
 		{
-			os<<result[y*h+x];
+			os<<result[y*(h+2)+x];
 
-			if(x<h-1)
+			if(x<h)
 			{
 				os<<",";
 			}
