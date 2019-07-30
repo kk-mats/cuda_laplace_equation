@@ -16,6 +16,7 @@ using device_buffer=thrust::device_vector<float>;
 using host_mask=thrust::host_vector<int>;
 using device_mask=thrust::device_vector<int>;
 constexpr int args_padded_size=0;
+constexpr int args_local_size=1;
 
 namespace kernel
 {
@@ -36,18 +37,17 @@ __device__
 void block_solver(float *buffer, float *delta, int *mask, int *args, const int offset)
 {
 	const int padded_size=args[args_padded_size];
-	const int local_size=blockDim.y;
-	
-	const int threads_per_block=blockDim.x*blockDim.y;
-	const int thread_id=threads_per_block*(gridDim.x*blockIdx.y+blockIdx.x)+blockDim.x*threadIdx.y+threadIdx.x;
 
-	const uint2 left_top_global=make_uint2(local_size*blockIdx.x, local_size*blockIdx.y);
+	const uint2 left_top_global=make_uint2(args[args_local_size]*blockIdx.x, args[args_local_size]*blockIdx.y);
 	const uint2 global_base=make_uint2(left_top_global.x+1+2*threadIdx.x, left_top_global.y+1+threadIdx.y);
-	const uint2 global=make_uint2(global_base.x+offset, global_base.y);
-
-	printf("at block(%2d, %2d) thread(%2d, %2d, id=%4d) target(%2d, %2d, 1d=%4d)\n", blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, thread_id, global.x, global.y, to_1d(global, padded_size));
-
-	buffer[to_1d(global, padded_size)]=(thread_id+1);
+	const int global_1d=to_1d(make_uint2(global_base.x+offset, global_base.y), padded_size);
+	
+	const float prev=buffer[global_1d];
+	buffer[global_1d]=(1-mask[global_1d])*prev+mask[global_1d]*(
+		buffer[global_1d-padded_size]+buffer[global_1d-1]+
+		buffer[global_1d+padded_size]+buffer[global_1d+1]
+		)/4;
+	delta[global_1d]=fabsf(buffer[global_1d]-prev)/100;
 }
 
 __global__
@@ -104,6 +104,7 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 	const int padded_size=global_size+2;
 	host_mask h_args;
 	h_args.push_back(padded_size);
+	h_args.push_back(local_size);
 	device_mask d_args=h_args;
 
 	device_buffer d_buffer=append_padding<float>(h_buffer, 0, global_size);
@@ -117,26 +118,31 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 	const dim3 grid(global_size/local_size, global_size/local_size);
 	const dim3 block(local_size/2, local_size);
 
+	int ctr=0;
 	try
 	{
 		do
 		{
+			kernel::even_solver<<<grid, block>>>(
+				thrust::raw_pointer_cast(d_buffer.data()),
+				thrust::raw_pointer_cast(d_delta.data()),
+				thrust::raw_pointer_cast(d_mask.data()),
+				thrust::raw_pointer_cast(d_args.data())
+				);
+
 			kernel::odd_solver<<<grid, block>>>(
 				thrust::raw_pointer_cast(d_buffer.data()), 
 				thrust::raw_pointer_cast(d_delta.data()),
 				thrust::raw_pointer_cast(d_mask.data()),
 				thrust::raw_pointer_cast(d_args.data())
 			);
-
-			cudaError_t err=cudaDeviceSynchronize();
-			if(err!=cudaSuccess)
-			{
-				std::cout<<cudaGetErrorString(err)<<std::endl;
-				break;
-			}
-
 			max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
-			std::cout<<"max_delta="<<max_delta<<std::endl;
+
+			if(ctr%100==0)
+			{
+				std::cout<<"loop:"<<ctr<<" max_delta="<<max_delta<<std::endl;
+			}
+			++ctr;
 		}
 		while(min_delta<max_delta);
 	}
@@ -183,8 +189,7 @@ public:
 
 	auto solve()
 	{
-		//return kernel::solver(this->buffer_, this->host_even_mask, this->host_odd_mask, this->host_global_mask);
-		return new_solver(this->h_buffer_, this->h_mask_, this->h_, 8);
+		return new_solver(this->h_buffer_, this->h_mask_, this->h_, 32);
 	}
 
 
@@ -216,7 +221,7 @@ private:
 
 int main()
 {
-	constexpr int h=32;
+	constexpr int h=2048;
 	auto solver=cpu_potential_solver(h);
 
 	const auto result=solver.solve();
