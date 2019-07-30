@@ -3,6 +3,10 @@
 #include <fstream>
 #include <vector>
 
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include <thrust/device_new.h>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <thrust/extrema.h>
@@ -11,13 +15,51 @@ using host_buffer=thrust::host_vector<float>;
 using device_buffer=thrust::device_vector<float>;
 using host_mask=thrust::host_vector<int>;
 using device_mask=thrust::device_vector<int>;
+constexpr int args_padded_size=0;
 
 namespace kernel
 {
-__global__
-void block_solver()
-{
 
+__device__
+int to_1d(const uint2 &index, const int width)
+{
+	return index.y*width+index.x;
+}
+
+__device__
+int to_1d(const int x, int y, const int width)
+{
+	return y*width+x;
+}
+
+__device__
+void block_solver(float *buffer, float *delta, int *mask, int *args, const int offset)
+{
+	const int padded_size=args[args_padded_size];
+	const int local_size=blockDim.y;
+	
+	const int threads_per_block=blockDim.x*blockDim.y;
+	const int thread_id=threads_per_block*(gridDim.x*blockIdx.y+blockIdx.x)+blockDim.x*threadIdx.y+threadIdx.x;
+
+	const uint2 left_top_global=make_uint2(local_size*blockIdx.x, local_size*blockIdx.y);
+	const uint2 global_base=make_uint2(left_top_global.x+1+2*threadIdx.x, left_top_global.y+1+threadIdx.y);
+	const uint2 global=make_uint2(global_base.x+offset, global_base.y);
+
+	printf("at block(%2d, %2d) thread(%2d, %2d, id=%4d) target(%2d, %2d, 1d=%4d)\n", blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, thread_id, global.x, global.y, to_1d(global, padded_size));
+
+	buffer[to_1d(global, padded_size)]=(thread_id+1);
+}
+
+__global__
+void even_solver(float *buffer, float *delta, int *mask, int *args)
+{
+	block_solver(buffer, delta, mask, args, threadIdx.y%2);
+}
+
+__global__
+void odd_solver(float *buffer, float *delta, int *mask, int *args)
+{
+	block_solver(buffer, delta, mask, args, 1-threadIdx.y%2);
 }
 
 }
@@ -56,10 +98,13 @@ auto remove_padding(const thrust::host_vector<T> &padded_buffer, const int origi
 	return buffer;
 }
 
-
+__host__
 auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int global_size, const int local_size)
 {
 	const int padded_size=global_size+2;
+	host_mask h_args;
+	h_args.push_back(padded_size);
+	device_mask d_args=h_args;
 
 	device_buffer d_buffer=append_padding<float>(h_buffer, 0, global_size);
 	device_mask d_mask=append_padding<int>(h_mask, 0, global_size);
@@ -70,19 +115,35 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 	const float min_delta=std::pow(10, -6);
 
 	const dim3 grid(global_size/local_size, global_size/local_size);
-	const dim3 block(local_size, local_size/2);
+	const dim3 block(local_size/2, local_size);
 
-	do
+	try
 	{
+		do
+		{
+			kernel::odd_solver<<<grid, block>>>(
+				thrust::raw_pointer_cast(d_buffer.data()), 
+				thrust::raw_pointer_cast(d_delta.data()),
+				thrust::raw_pointer_cast(d_mask.data()),
+				thrust::raw_pointer_cast(d_args.data())
+			);
 
+			cudaError_t err=cudaDeviceSynchronize();
+			if(err!=cudaSuccess)
+			{
+				std::cout<<cudaGetErrorString(err)<<std::endl;
+				break;
+			}
 
-
-
-
-		max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
-		std::cout<<"max_delta="<<max_delta<<std::endl;
+			max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
+			std::cout<<"max_delta="<<max_delta<<std::endl;
+		}
+		while(min_delta<max_delta);
 	}
-	while(min_delta<max_delta);
+	catch(thrust::system_error &e)
+	{
+		std::cerr<<"Exception:\n"<<e.what()<<std::endl;
+	}
 
 	host_buffer new_h_buffer=d_buffer;
 	return remove_padding<float>(new_h_buffer, global_size);
@@ -123,19 +184,7 @@ public:
 	auto solve()
 	{
 		//return kernel::solver(this->buffer_, this->host_even_mask, this->host_odd_mask, this->host_global_mask);
-		try
-		{
-			return new_solver(this->h_buffer_, this->h_mask_, this->h_, 16);
-		}
-		catch(thrust::system_error &e)
-		{
-			std::cerr<<"Exception:\n"<<e.what()<<std::endl;
-		}
-	}
-
-	auto result() const
-	{
-		return this->h_buffer_;
+		return new_solver(this->h_buffer_, this->h_mask_, this->h_, 8);
 	}
 
 
