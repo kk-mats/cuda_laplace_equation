@@ -64,19 +64,22 @@ auto new_solver(const host_buffer &h_buffer, const host_mask &h_mask, const int 
 	device_buffer d_buffer=append_padding<float>(h_buffer, 0, global_size);
 	device_mask d_mask=append_padding<int>(h_mask, 0, global_size);
 
-	host_buffer h_delta(padded_size*padded_size, 0.f);
-	device_buffer d_delta=h_delta;;
-
+	device_buffer d_delta(padded_size*padded_size, 0.f);
 
 	float max_delta=0;
-	float min_delta=std::pow(10, -6);
+	const float min_delta=std::pow(10, -6);
 
+	const dim3 grid(global_size/local_size, global_size/local_size);
+	const dim3 block(local_size, local_size/2);
 
 	do
 	{
-		d_delta=h_delta;
-		max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
 
+
+
+
+
+		max_delta=*thrust::max_element(thrust::device, d_delta.begin(), d_delta.end());
 		std::cout<<"max_delta="<<max_delta<<std::endl;
 	}
 	while(min_delta<max_delta);
